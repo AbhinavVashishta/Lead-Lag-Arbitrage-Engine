@@ -3,12 +3,15 @@ import json
 import time
 from typing import List, Dict
 import websockets
+import numpy as np
+from src.dsp_engine import WienerKhinchinDSP
 from src.zoh_resampler import ZOHResampler
 
 class LiveExchangeStreamer:
-    #Connects to the live data stream and feeds it into the resampler
+    #Connects to the live data stream and feeds it into the resampler & the DSP engine
     def __init__(self, dt_ms: float = 5.0, buffer_capacity: int = 4096):
         self.resampler = ZOHResampler(dt_ms=dt_ms, buffer_capacity=buffer_capacity)
+        self.dsp_engine = WienerKhinchinDSP(dt_ms = dt_ms)
         self.leader_ticks: List[Dict[str, float]] = []
         self.lagger_ticks: List[Dict[str, float]] = []
         self.is_running = False
@@ -22,7 +25,7 @@ class LiveExchangeStreamer:
                     message = await ws.recv()
                     data = json.loads(message)
                     tick = {
-                        'timestamp': float(data['T']) / 1000.0,
+                        'timestamp': time.time(),
                         'price': float(data['p'])
                     }
                     self.leader_ticks.append(tick)
@@ -57,7 +60,7 @@ class LiveExchangeStreamer:
                     await asyncio.sleep(1)
 
     async def run_resampler_clock(self, batch_interval_sec: float = 1.0):
-        #flushes ingested ticks through the ZOH Resampler,
+        #flushes ingested ticks through the ZOH Resampler and into DSP engine
         #outputs the synchronized vectors x[n] and y[n] .
         print("[Clock] Waiting 3 seconds for initial exchange liquidity...")
         await asyncio.sleep(3.0)
@@ -77,10 +80,14 @@ class LiveExchangeStreamer:
             
             x, y = self.resampler.resample_stream(l_batch, r_batch, last_time, current_time)
             
-            print(f"\n--- [Live Window: {batch_interval_sec}s | Δt = {self.resampler.dt*1000}ms] ---")
+            print(f"\n[Live Window: {batch_interval_sec}s | Δt = {self.resampler.dt*1000}ms]")
             print(f"Leader (Binance)  Ticks Ingested: {len(l_batch)} | Array Size: {len(x)} | Latest: ${x[-1]:.2f}" if len(x) > 0 else "Waiting for initial valid price...")
             print(f"Lagger (Coinbase) Ticks Ingested: {len(r_batch)} | Array Size: {len(y)} | Latest: ${y[-1]:.2f}" if len(y) > 0 else "Waiting for initial valid price...")
             
+            #run FFT when enough data has been collected
+            if(len(x)>100 and len(x)==len(y)):
+                tau_max, rho, _ = self.dsp_engine.compute_cross_correlation(x, y)
+                print(f"Detected Lag: {tau_max*1000:.2f} ms | Confidence: {rho:.4f}")
             last_time = current_time
 
     async def start(self):
