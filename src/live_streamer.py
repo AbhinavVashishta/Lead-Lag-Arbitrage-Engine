@@ -18,46 +18,54 @@ class LiveExchangeStreamer:
 
     async def consume_binance(self, symbol: str = "btcusdt"):
         uri = f"wss://stream.binance.com:9443/ws/{symbol}@trade"
-        async with websockets.connect(uri) as ws:
-            print(f"[Leader] Connected to Binance ({symbol.upper()})")
-            while self.is_running:
-                try:
-                    message = await ws.recv()
-                    data = json.loads(message)
-                    tick = {
-                        'timestamp': time.perf_counter(),
-                        'price': float(data['p'])
-                    }
-                    self.leader_ticks.append(tick)
-                except Exception as e:
-                    print(f"[Leader Error] {e}")
-                    await asyncio.sleep(1)
+        retry_delay = 1
+        while self.is_running:
+            try:
+                async with websockets.connect(uri) as ws:
+                    print(f"[Leader] Connected to Binance ({symbol.upper()})")
+                    retry_delay = 1
+                    while self.is_running:
+                        message = await ws.recv()
+                        data = json.loads(message)
+                        tick = {
+                            'timestamp': time.perf_counter(),
+                            'price': float(data['p'])
+                        }
+                        self.leader_ticks.append(tick)
+            except Exception as e:
+                print(f"[Leader Error] {e}")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay*2, 30)
 
     async def consume_coinbase(self, product_id: str = "BTC-USD"):
         uri = "wss://ws-feed.exchange.coinbase.com"
-        async with websockets.connect(uri) as ws:
-            subscribe_msg = {
-                "type": "subscribe",
-                "product_ids": [product_id],
-                "channels": ["matches"]
-            }
-            await ws.send(json.dumps(subscribe_msg))
-            print(f"[Lagger] Connected to Coinbase ({product_id})")
-            
-            while self.is_running:
-                try:
-                    message = await ws.recv()
-                    data = json.loads(message)
-                    if data.get('type') == 'match':
-                        # Convert Coinbase ISO timestamp or system time to epoch seconds
-                        tick = {
-                            'timestamp': time.perf_counter(), 
-                            'price': float(data['price'])
-                        }
-                        self.lagger_ticks.append(tick)
-                except Exception as e:
-                    print(f"[Lagger Error] {e}")
-                    await asyncio.sleep(1)
+        retry_delay = 1
+        while self.is_running:
+            try:
+                async with websockets.connect(uri) as ws:
+                    subscribe_msg = {
+                        "type": "subscribe",
+                        "product_ids": [product_id],
+                        "channels": ["matches"]
+                    }
+                    await ws.send(json.dumps(subscribe_msg))
+                    print(f"[Lagger] Connected to Coinbase ({product_id})")
+                    retry_delay = 1
+
+                    while self.is_running:
+                        message = await ws.recv()
+                        data = json.loads(message)
+                        if data.get('type') == 'match':
+                            # Convert Coinbase ISO timestamp or system time to epoch seconds
+                            tick = {
+                                'timestamp': time.perf_counter(), 
+                                'price': float(data['price'])
+                            }
+                            self.lagger_ticks.append(tick)
+            except Exception as e:
+                print(f"[Lagger Error] {e}")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay*2, 30)
 
     async def run_resampler_clock(self, batch_interval_sec: float = 1.0):
         #flushes ingested ticks through the ZOH Resampler and into DSP engine

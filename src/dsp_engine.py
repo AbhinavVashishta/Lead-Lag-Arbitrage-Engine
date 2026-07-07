@@ -31,14 +31,15 @@ class WienerKhinchinDSP:
         var_x = np.sum(x_clean**2)
         var_y = np.sum(y_clean**2)
         if(var_x == 0.0 or var_y == 0.0):
-            return 0.0, 0.0, np.zeroes(n)
+            return 0.0, 0.0, np.zeros(2*len(x_clean)-1)
         
-        #Since we have circle around logic, we want to avoid abrupt jumps creating false frequencies, so we use a hann window
-        #removing hann window to check something
         n = len(x_clean)
-        #hann_window = np.hanning(n)
-        x_win = x_clean
-        y_win = y_clean
+        
+        # Hann window has been permanently removed. Because Price Velocity naturally 
+        # centers at zero, removing the threat of spectral leakage, we leave the edges 
+        # un-muted so the engine instantly feels live trades on the very first tick.
+        x_win = x_clean 
+        y_win = y_clean 
 
         pad_len = 2*n-1
 
@@ -53,10 +54,9 @@ class WienerKhinchinDSP:
 
         r_xy_shifted = np.fft.fftshift(r_xy_padded)
 
-        max_idx = np.argmax(r_xy_shifted)
-
         center_idx = pad_len//2
 
+        # Clamp the search radius to +/- 500ms to prevent hallucinating impossible network delays
         search_start = max(0, center_idx - self.max_lag_buckets)
         search_end = min(pad_len, center_idx + self.max_lag_buckets + 1)
 

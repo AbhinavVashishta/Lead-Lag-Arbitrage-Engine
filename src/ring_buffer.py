@@ -20,6 +20,6 @@ class RingBuffer:
     
     def get_window(self) -> np.ndarray:
         if(self.size<self.capacity):
-            return self.buffer[:self.size]
+            return self.buffer[:self.size].copy()
         
         return np.concatenate((self.buffer[self.index:], self.buffer[:self.index]))

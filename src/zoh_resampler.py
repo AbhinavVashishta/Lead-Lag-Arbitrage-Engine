@@ -11,7 +11,7 @@ class ZOHResampler:
     def __init__(self, dt_ms: float = 5.0, buffer_capacity: int = 4096):
         self.dt = dt_ms/1000.0 #converting to seconds to match timestaps
         self.leader_buffer = RingBuffer(capacity=buffer_capacity)
-        self.lagget_buffer = RingBuffer(capacity=buffer_capacity)
+        self.lagger_buffer = RingBuffer(capacity=buffer_capacity)
 
         #tracking the state for the carry forward logic ;)
         self.last_leader_price = np.nan
@@ -19,7 +19,7 @@ class ZOHResampler:
     
     def resample_stream(self, leader_ticks: List[Dict[str, float]], lagger_ticks: List[Dict[str, float]],
                         start_time: float, end_time:float)-> Tuple[np.ndarray, np.ndarray]:
-        time_grid = np.arange(start_time, end_time, self.dt)
+        time_grid = np.arange(start_time + self.dt, end_time + self.dt, self.dt)
 
         #pointers to store our position
         left_index, right_index = 0, 0
@@ -42,8 +42,6 @@ class ZOHResampler:
                 right_index+=1
             
             if not np.isnan(self.last_lagger_price):
-                self.lagget_buffer.append(self.last_lagger_price)
+                self.lagger_buffer.append(self.last_lagger_price)
                 
-        return self.leader_buffer.get_window(), self.lagget_buffer.get_window()
-
-
+        return self.leader_buffer.get_window(), self.lagger_buffer.get_window()
