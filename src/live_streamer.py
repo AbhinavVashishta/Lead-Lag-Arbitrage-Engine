@@ -25,7 +25,7 @@ class LiveExchangeStreamer:
                     message = await ws.recv()
                     data = json.loads(message)
                     tick = {
-                        'timestamp': time.time(),
+                        'timestamp': time.perf_counter(),
                         'price': float(data['p'])
                     }
                     self.leader_ticks.append(tick)
@@ -51,7 +51,7 @@ class LiveExchangeStreamer:
                     if data.get('type') == 'match':
                         # Convert Coinbase ISO timestamp or system time to epoch seconds
                         tick = {
-                            'timestamp': time.time(), 
+                            'timestamp': time.perf_counter(), 
                             'price': float(data['price'])
                         }
                         self.lagger_ticks.append(tick)
@@ -65,11 +65,11 @@ class LiveExchangeStreamer:
         print("[Clock] Waiting 3 seconds for initial exchange liquidity...")
         await asyncio.sleep(3.0)
         
-        last_time = time.time() - batch_interval_sec
+        last_time = time.perf_counter() - batch_interval_sec
         
         while self.is_running:
             await asyncio.sleep(batch_interval_sec)
-            current_time = time.time()
+            current_time = time.perf_counter()
             
             l_batch = [t for t in self.leader_ticks if last_time <= t['timestamp'] <= current_time]
             r_batch = [t for t in self.lagger_ticks if last_time <= t['timestamp'] <= current_time]
