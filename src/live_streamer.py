@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 from typing import List, Dict
 import websockets
 import numpy as np
@@ -16,9 +17,13 @@ class LiveExchangeStreamer:
     def __init__(self, dt_ms: float = 5.0, buffer_capacity: int = 4096):
         self.resampler = ZOHResampler(dt_ms=dt_ms, buffer_capacity=buffer_capacity)
         self.dsp_engine = WienerKhinchinDSP(dt_ms=dt_ms)
-        # Initialize Component 3 with strict gating: rho > 0.80 and 0.05% velocity threshold
-        self.trigger_layer = SignalTriggerLayer(min_confidence=0.80, min_velocity_threshold=0.0005,
-                                                 min_lag_seconds=0.0)
+        
+        self.trigger_layer = SignalTriggerLayer(
+            min_confidence=0.80, 
+            taker_fee_rate=0.0005, 
+            alpha_buffer=0.0005,
+            min_lag_seconds=0.0
+        )
         
         self.leader_ticks: List[Dict[str, float]] = []
         self.lagger_ticks: List[Dict[str, float]] = []
@@ -36,7 +41,7 @@ class LiveExchangeStreamer:
                         message = await ws.recv()
                         data = json.loads(message)
                         tick = {
-                            'timestamp': time.perf_counter(),
+                            'timestamp': data['T'] / 1000.0,
                             'price': float(data['p'])
                         }
                         self.leader_ticks.append(tick)
@@ -64,8 +69,9 @@ class LiveExchangeStreamer:
                         message = await ws.recv()
                         data = json.loads(message)
                         if data.get('type') == 'match':
+                            trade_time = datetime.fromisoformat(data['time'].replace('Z', '+00:00'))
                             tick = {
-                                'timestamp': time.perf_counter(), 
+                                'timestamp': trade_time.timestamp(),
                                 'price': float(data['price'])
                             }
                             self.lagger_ticks.append(tick)
@@ -78,11 +84,11 @@ class LiveExchangeStreamer:
         print("[Clock] Waiting 3 seconds for initial exchange liquidity...")
         await asyncio.sleep(3.0)
         
-        last_time = time.perf_counter() - batch_interval_sec
+        last_time = time.time() - batch_interval_sec
         
         while self.is_running:
             await asyncio.sleep(batch_interval_sec)
-            current_time = time.perf_counter()
+            current_time = time.time()
             
             l_batch = [t for t in self.leader_ticks if last_time <= t['timestamp'] <= current_time]
             r_batch = [t for t in self.lagger_ticks if last_time <= t['timestamp'] <= current_time]
@@ -107,8 +113,8 @@ class LiveExchangeStreamer:
                     print(f"🚨 [EXECUTION SIGNAL FIRED] - ID #{signal_payload['signal_id']}")
                     print(f"Action:      {signal_payload['action']} {signal_payload['symbol']} @ {signal_payload['target_exchange']}")
                     print(f"Lag Locked:  {signal_payload['detected_lag_ms']} ms | Confidence: {signal_payload['confidence_rho']}")
-                    print(f"Velocity:    {signal_payload['leader_velocity_pct']}% | Current Ref: ${signal_payload['lagger_reference_price']}")
-                    print(f"Target Px:   ${signal_payload['anticipated_target_price']}")
+                    print(f"Hurdle Gate: {signal_payload['required_hurdle_pct']}% | Velocity: {signal_payload['leader_velocity_pct']}%")
+                    print(f"Target Px:   ${signal_payload['anticipated_target_price']} | Ref: ${signal_payload['lagger_reference_price']}")
                     print("="*70 + "\n")
                     
             last_time = current_time
