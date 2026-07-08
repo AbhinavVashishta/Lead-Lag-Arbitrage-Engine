@@ -6,12 +6,20 @@ import websockets
 import numpy as np
 from src.dsp_engine import WienerKhinchinDSP
 from src.zoh_resampler import ZOHResampler
+from src.trigger_layer import SignalTriggerLayer
 
 class LiveExchangeStreamer:
-    #Connects to the live data stream and feeds it into the resampler & the DSP engine
+    """
+    Connects to live data streams, resamples ticks into uniform grids,
+    computes Wiener-Khinchin cross-correlation, and evaluates execution triggers.
+    """
     def __init__(self, dt_ms: float = 5.0, buffer_capacity: int = 4096):
         self.resampler = ZOHResampler(dt_ms=dt_ms, buffer_capacity=buffer_capacity)
-        self.dsp_engine = WienerKhinchinDSP(dt_ms = dt_ms)
+        self.dsp_engine = WienerKhinchinDSP(dt_ms=dt_ms)
+        # Initialize Component 3 with strict gating: rho > 0.80 and 0.05% velocity threshold
+        self.trigger_layer = SignalTriggerLayer(min_confidence=0.80, min_velocity_threshold=0.0005,
+                                                 min_lag_seconds=0.0)
+        
         self.leader_ticks: List[Dict[str, float]] = []
         self.lagger_ticks: List[Dict[str, float]] = []
         self.is_running = False
@@ -35,7 +43,7 @@ class LiveExchangeStreamer:
             except Exception as e:
                 print(f"[Leader Error] {e}")
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay*2, 30)
+                retry_delay = min(retry_delay * 2, 30)
 
     async def consume_coinbase(self, product_id: str = "BTC-USD"):
         uri = "wss://ws-feed.exchange.coinbase.com"
@@ -56,7 +64,6 @@ class LiveExchangeStreamer:
                         message = await ws.recv()
                         data = json.loads(message)
                         if data.get('type') == 'match':
-                            # Convert Coinbase ISO timestamp or system time to epoch seconds
                             tick = {
                                 'timestamp': time.perf_counter(), 
                                 'price': float(data['price'])
@@ -65,11 +72,9 @@ class LiveExchangeStreamer:
             except Exception as e:
                 print(f"[Lagger Error] {e}")
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay*2, 30)
+                retry_delay = min(retry_delay * 2, 30)
 
     async def run_resampler_clock(self, batch_interval_sec: float = 1.0):
-        #flushes ingested ticks through the ZOH Resampler and into DSP engine
-        #outputs the synchronized vectors x[n] and y[n] .
         print("[Clock] Waiting 3 seconds for initial exchange liquidity...")
         await asyncio.sleep(3.0)
         
@@ -82,7 +87,6 @@ class LiveExchangeStreamer:
             l_batch = [t for t in self.leader_ticks if last_time <= t['timestamp'] <= current_time]
             r_batch = [t for t in self.lagger_ticks if last_time <= t['timestamp'] <= current_time]
             
-            # Prune processed ticks from memory to prevent RAM bloat
             self.leader_ticks = [t for t in self.leader_ticks if t['timestamp'] > current_time]
             self.lagger_ticks = [t for t in self.lagger_ticks if t['timestamp'] > current_time]
             
@@ -92,14 +96,24 @@ class LiveExchangeStreamer:
             print(f"Leader (Binance)  Ticks Ingested: {len(l_batch)} | Array Size: {len(x)} | Latest: ${x[-1]:.2f}" if len(x) > 0 else "Waiting for initial valid price...")
             print(f"Lagger (Coinbase) Ticks Ingested: {len(r_batch)} | Array Size: {len(y)} | Latest: ${y[-1]:.2f}" if len(y) > 0 else "Waiting for initial valid price...")
             
-            #run FFT when enough data has been collected
-            if(len(x)>100 and len(x)==len(y)):
+            if len(x) > 100 and len(x) == len(y):
                 tau_max, rho, _ = self.dsp_engine.compute_cross_correlation(x, y)
                 print(f"Detected Lag: {tau_max*1000:.2f} ms | Confidence: {rho:.4f}")
+                
+                # Component 3: Evaluate execution conditions
+                signal_payload = self.trigger_layer.evaluate_signal(x, y, tau_max, rho)
+                if signal_payload:
+                    print("\n" + "="*70)
+                    print(f"🚨 [EXECUTION SIGNAL FIRED] - ID #{signal_payload['signal_id']}")
+                    print(f"Action:      {signal_payload['action']} {signal_payload['symbol']} @ {signal_payload['target_exchange']}")
+                    print(f"Lag Locked:  {signal_payload['detected_lag_ms']} ms | Confidence: {signal_payload['confidence_rho']}")
+                    print(f"Velocity:    {signal_payload['leader_velocity_pct']}% | Current Ref: ${signal_payload['lagger_reference_price']}")
+                    print(f"Target Px:   ${signal_payload['anticipated_target_price']}")
+                    print("="*70 + "\n")
+                    
             last_time = current_time
 
     async def start(self):
-        #Launches WebSocket listeners and the ZOH clock concurrently.
         self.is_running = True
         await asyncio.gather(
             self.consume_binance("btcusdt"),
