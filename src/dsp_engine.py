@@ -35,11 +35,10 @@ class WienerKhinchinDSP:
         
         n = len(x_clean)
         
-        # Hann window has been permanently removed. Because Price Velocity naturally 
-        # centers at zero, removing the threat of spectral leakage, we leave the edges 
-        # un-muted so the engine instantly feels live trades on the very first tick.
-        x_win = x_clean 
-        y_win = y_clean 
+        # still need hann window after further testing
+        hann = np.hanning(n)
+        x_win = x_clean * hann
+        y_win = y_clean * hann
 
         pad_len = 2*n-1
 
