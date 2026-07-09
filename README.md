@@ -32,7 +32,7 @@ $$R_{xy}(\tau) = \sum_{t} x[t]\, y[t+\tau]$$
 
 Computing this directly for every candidate lag is `O(n²)`. The **Wiener–Khinchin theorem** avoids that by stating that cross-correlation and cross-power spectral density are a Fourier transform pair:
 
-$$R_{xy}(\tau) = \mathcal{F}^{-1}\big\{\,\overline{X(f)} \cdot Y(f)\,\big\}$$
+$$R_{xy}(\tau) = \mathcal{F}^{-1}\left\{ \overline{X(f)} \cdot Y(f) \right\}$$
 
 where `X(f) = FFT(x)`, `Y(f) = FFT(y)`, and the bar denotes complex conjugate. Two forward FFTs, one elementwise multiply, one inverse FFT — every lag recovered at once in `O(n log n)`.
 
