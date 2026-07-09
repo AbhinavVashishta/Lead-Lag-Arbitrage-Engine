@@ -17,7 +17,7 @@ class LatencyAwareBacktester:
         alpha_buffer: float = 0.0005,
         min_lag_seconds: float = 0.0,
         latency_ms: float = 30.0,
-        batch_interval_sec: float = 1.0
+        dsp_refresh_sec: float = 0.1
     ):
         self.resampler = ZOHResampler(dt_ms=dt_ms, buffer_capacity=buffer_capacity)
         self.dsp_engine = WienerKhinchinDSP(dt_ms=dt_ms)
@@ -30,7 +30,7 @@ class LatencyAwareBacktester:
 
         self.latency_sec = latency_ms / 1000.0
         self.round_trip_fee = 2.0 * taker_fee_rate
-        self.batch_interval_sec = batch_interval_sec
+        self.dsp_refresh_sec = dsp_refresh_sec
 
         self.signals: List[Dict[str, Any]] = []
         self.trades: List[Dict[str, Any]] = []
@@ -55,32 +55,30 @@ class LatencyAwareBacktester:
         start = max(leader_ticks[0]['timestamp'], lagger_ticks[0]['timestamp'])
         end = min(leader_ticks[-1]['timestamp'], lagger_ticks[-1]['timestamp'])
 
-        window_start = start
-        while window_start + self.batch_interval_sec <= end:
-            window_end = window_start + self.batch_interval_sec
+        last_tau_max, last_rho = 0.0, 0.0
+        next_dsp_refresh = start
 
-            l_batch = [t for t in leader_ticks if window_start <= t['timestamp'] <= window_end]
-            r_batch = [t for t in lagger_ticks if window_start <= t['timestamp'] <= window_end]
+        for t_end, x, y in self.resampler.resample_stream(leader_ticks, lagger_ticks, start, end):
+            if len(x) <= 100:
+                continue
 
-            x, y = self.resampler.resample_stream(l_batch, r_batch, window_start, window_end)
+            if t_end >= next_dsp_refresh:
+                last_tau_max, last_rho, _ = self.dsp_engine.compute_cross_correlation(x, y)
+                next_dsp_refresh = t_end + self.dsp_refresh_sec
 
-            if len(x) > 100 and len(x) == len(y):
-                tau_max, rho, _ = self.dsp_engine.compute_cross_correlation(x, y)
-                signal = self.trigger_layer.evaluate_signal(x, y, tau_max, rho)
+            signal = self.trigger_layer.evaluate_signal(x, y, last_tau_max, last_rho)
 
-                self.signals.append({
-                    'tau_max': tau_max,
-                    'rho': rho,
-                    'signal_time': window_end,
-                    'fired': signal is not None
-                })
+            self.signals.append({
+                'tau_max': last_tau_max,
+                'rho': last_rho,
+                'signal_time': t_end,
+                'fired': signal is not None
+            })
 
-                if signal is not None:
-                    trade = self._simulate_fill(signal, window_end, tau_max, lagger_ticks, lagger_timestamps)
-                    if trade is not None:
-                        self.trades.append(trade)
-
-            window_start = window_end
+            if signal is not None:
+                trade = self._simulate_fill(signal, t_end, last_tau_max, lagger_ticks, lagger_timestamps)
+                if trade is not None:
+                    self.trades.append(trade)
 
         return self._summarize()
 
@@ -130,7 +128,7 @@ class LatencyAwareBacktester:
 
         if n_trades == 0:
             return {
-                'n_windows_evaluated': len(self.signals),
+                'n_buckets_evaluated': len(self.signals),
                 'n_signals_fired': n_fired,
                 'n_trades_filled': 0,
                 'sharpe_ratio': 0.0,
@@ -148,12 +146,10 @@ class LatencyAwareBacktester:
 
         sharpe = 0.0
         if returns.std() > 0:
-            # per-trade Sharpe scaled by sqrt(N) - not a calendar annualization, this is an
-            # HFT strategy so "per year" is meaningless without knowing the true signal rate
             sharpe = float(returns.mean() / returns.std() * np.sqrt(n_trades))
 
         return {
-            'n_windows_evaluated': len(self.signals),
+            'n_buckets_evaluated': len(self.signals),
             'n_signals_fired': n_fired,
             'n_trades_filled': n_trades,
             'sharpe_ratio': round(sharpe, 4),
@@ -202,7 +198,7 @@ if __name__ == "__main__":
     bt = LatencyAwareBacktester(latency_ms=30.0)
     results = bt.run(leader_ticks, lagger_ticks)
 
-    print(f"\nWindows evaluated: {results['n_windows_evaluated']}")
+    print(f"\nBuckets evaluated: {results['n_buckets_evaluated']}")
     print(f"Signals fired:     {results['n_signals_fired']}")
     print(f"Trades filled:     {results['n_trades_filled']}")
     print(f"Sharpe ratio:      {results['sharpe_ratio']}")
