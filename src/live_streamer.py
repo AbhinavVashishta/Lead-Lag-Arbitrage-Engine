@@ -28,6 +28,8 @@ class LiveExchangeStreamer:
         self.leader_ticks: List[Dict[str, float]] = []
         self.lagger_ticks: List[Dict[str, float]] = []
         self.is_running = False
+        self.last_tau_max = 0.0
+        self.last_rho = 0.0
 
     async def consume_binance(self, symbol: str = "btcusdt"):
         uri = f"wss://stream.binance.com:9443/ws/{symbol}@trade"
@@ -80,34 +82,34 @@ class LiveExchangeStreamer:
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 30)
 
-    async def run_resampler_clock(self, batch_interval_sec: float = 1.0):
+    async def run_resampler_clock(self, batch_interval_sec: float = 1.0, dsp_refresh_sec: float = 0.1):
         print("[Clock] Waiting 3 seconds for initial exchange liquidity...")
         await asyncio.sleep(3.0)
         
         last_time = time.time() - batch_interval_sec
+        next_dsp_refresh = 0.0
         
         while self.is_running:
             await asyncio.sleep(batch_interval_sec)
             current_time = time.time()
             
-            l_batch = [t for t in self.leader_ticks if last_time <= t['timestamp'] <= current_time]
-            r_batch = [t for t in self.lagger_ticks if last_time <= t['timestamp'] <= current_time]
+            l_batch = [t for t in self.leader_ticks if last_time < t['timestamp'] <= current_time]
+            r_batch = [t for t in self.lagger_ticks if last_time < t['timestamp'] <= current_time]
             
             self.leader_ticks = [t for t in self.leader_ticks if t['timestamp'] > current_time]
             self.lagger_ticks = [t for t in self.lagger_ticks if t['timestamp'] > current_time]
             
-            x, y = self.resampler.resample_stream(l_batch, r_batch, last_time, current_time)
-            
-            print(f"\n[Live Window: {batch_interval_sec}s | Δt = {self.resampler.dt*1000}ms]")
-            print(f"Leader (Binance)  Ticks Ingested: {len(l_batch)} | Array Size: {len(x)} | Latest: ${x[-1]:.2f}" if len(x) > 0 else "Waiting for initial valid price...")
-            print(f"Lagger (Coinbase) Ticks Ingested: {len(r_batch)} | Array Size: {len(y)} | Latest: ${y[-1]:.2f}" if len(y) > 0 else "Waiting for initial valid price...")
-            
-            if len(x) > 100 and len(x) == len(y):
-                tau_max, rho, _ = self.dsp_engine.compute_cross_correlation(x, y)
-                print(f"Detected Lag: {tau_max*1000:.2f} ms | Confidence: {rho:.4f}")
-                
-                # Component 3: Evaluate execution conditions
-                signal_payload = self.trigger_layer.evaluate_signal(x, y, tau_max, rho)
+            x, y = np.array([]), np.array([])
+            for t_end, x, y in self.resampler.resample_stream(l_batch, r_batch, last_time, current_time):
+                if len(x) <= 100:
+                    continue
+
+                if t_end >= next_dsp_refresh:
+                    self.last_tau_max, self.last_rho, _ = self.dsp_engine.compute_cross_correlation(x, y)
+                    next_dsp_refresh = t_end + dsp_refresh_sec
+
+                # Evaluate execution conditions, every bucket, not just at the end of the batch
+                signal_payload = self.trigger_layer.evaluate_signal(x, y, self.last_tau_max, self.last_rho)
                 if signal_payload:
                     print("\n" + "="*70)
                     print(f"🚨 [EXECUTION SIGNAL FIRED] - ID #{signal_payload['signal_id']}")
@@ -116,6 +118,12 @@ class LiveExchangeStreamer:
                     print(f"Hurdle Gate: {signal_payload['required_hurdle_pct']}% | Velocity: {signal_payload['leader_velocity_pct']}%")
                     print(f"Target Px:   ${signal_payload['anticipated_target_price']} | Ref: ${signal_payload['lagger_reference_price']}")
                     print("="*70 + "\n")
+
+            print(f"\n[Live Window: {batch_interval_sec}s | Δt = {self.resampler.dt*1000}ms]")
+            print(f"Leader (Binance)  Ticks Ingested: {len(l_batch)} | Array Size: {len(x)} | Latest: ${x[-1]:.2f}" if len(x) > 0 else "Waiting for initial valid price...")
+            print(f"Lagger (Coinbase) Ticks Ingested: {len(r_batch)} | Array Size: {len(y)} | Latest: ${y[-1]:.2f}" if len(y) > 0 else "Waiting for initial valid price...")
+            if len(x) > 100:
+                print(f"Detected Lag: {self.last_tau_max*1000:.2f} ms | Confidence: {self.last_rho:.4f}")
                     
             last_time = current_time
 
@@ -124,7 +132,7 @@ class LiveExchangeStreamer:
         await asyncio.gather(
             self.consume_binance("btcusdt"),
             self.consume_coinbase("BTC-USD"),
-            self.run_resampler_clock(batch_interval_sec=1.0)
+            self.run_resampler_clock(batch_interval_sec=1.0, dsp_refresh_sec=0.1)
         )
 
 if __name__ == "__main__":
