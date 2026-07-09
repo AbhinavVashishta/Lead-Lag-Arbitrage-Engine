@@ -3,7 +3,7 @@ FFT works on discrete time jumps, but markets aren't that kind, this zero order 
 adjusts our timeline to be more kin
 """
 
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Iterator
 import numpy as np
 from src.ring_buffer import RingBuffer
 
@@ -18,7 +18,7 @@ class ZOHResampler:
         self.last_lagger_price = np.nan
     
     def resample_stream(self, leader_ticks: List[Dict[str, float]], lagger_ticks: List[Dict[str, float]],
-                        start_time: float, end_time:float)-> Tuple[np.ndarray, np.ndarray]:
+                        start_time: float, end_time:float)-> Iterator[Tuple[float, np.ndarray, np.ndarray]]:
         time_grid = np.arange(start_time + self.dt, end_time + self.dt, self.dt)
 
         #pointers to store our position
@@ -31,17 +31,12 @@ class ZOHResampler:
             while left_index<num_leader_ticks and leader_ticks[left_index]['timestamp']<=t_end:
                 self.last_leader_price = leader_ticks[left_index]['price']
                 left_index+=1
-            
-            #if no trades keep the old value (we have to make sure something was there before to begin with tho)
-            if not np.isnan(self.last_leader_price):
-                self.leader_buffer.append(self.last_leader_price)
-            
-            #same thing for lagging
+
             while right_index<num_lagger_ticks and lagger_ticks[right_index]['timestamp']<=t_end:
                 self.last_lagger_price = lagger_ticks[right_index]['price']
                 right_index+=1
-            
-            if not np.isnan(self.last_lagger_price):
+
+            if not np.isnan(self.last_leader_price) and not np.isnan(self.last_lagger_price):
+                self.leader_buffer.append(self.last_leader_price)
                 self.lagger_buffer.append(self.last_lagger_price)
-                
-        return self.leader_buffer.get_window(), self.lagger_buffer.get_window()
+                yield t_end, self.leader_buffer.get_window(), self.lagger_buffer.get_window()
